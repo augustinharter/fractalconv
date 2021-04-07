@@ -103,10 +103,12 @@ class ReConvNet(nn.Module):
 if __name__ == "__main__":
     save_path = f"results/workspace/"
     os.makedirs(save_path, exist_ok=True)
+    device = "cuda" if T.cuda.is_available() else "cpu"
+    print("device:", device)
 
     v = 0
     a = 0.95
-    model = ReConvNet(3, 128, 5, 5)
+    model = ReConvNet(3, 128, 5, 5).to(device)
 
     #train_loader = T.utils.data.DataLoader(MNIST("data/mnist", download=True, train=True, 
     #    transform=transforms.ToTensor()), batch_size=64)
@@ -117,7 +119,8 @@ if __name__ == "__main__":
 
     for epoch in range(10):
         for batch_n, (X,Y) in enumerate(train_loader):
-
+            X = X.to(device)
+            Y = Y.to(device)
             enc = model(X)
             #print("enc", enc.shape)
             #print(enc.requires_grad)
