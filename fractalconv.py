@@ -100,6 +100,40 @@ class ReConvNet(nn.Module):
         return pred
 
 
+def eval_model(model, loader):
+    hits = []
+    for batch_n, (X,Y) in enumerate(loader):
+        X = X.to(device)
+        Y = Y.to(device)
+        enc = model(X)
+        #print("enc", enc.shape)
+        #print(enc.requires_grad)
+
+        #loss = F.cross_entropy(enc.flatten(1)[:,:10], Y)
+        loss = F.cross_entropy(enc, Y)
+
+        opti.zero_grad()
+        loss.backward()
+        opti.step()
+
+        enc = enc.cpu()
+        Y = Y.cpu()
+        #X = X.cpu()
+        hits.append(T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)==Y)
+        if batch_n != 10:
+            acc = hits[-1].sum()/len(hits[-1])
+            print("running eval:", batch_n, acc.numpy().round(3), end="\r")
+        
+        if batch_n>=10:
+            break
+
+    
+    print()
+    hits = T.cat(hits, dim=0)
+    acc = hits.sum()/hits.shape[0]
+    print("eval finished - accuracy:", acc.item())
+
+
 if __name__ == "__main__":
     save_path = f"results/workspace/"
     os.makedirs(save_path, exist_ok=True)
@@ -109,15 +143,18 @@ if __name__ == "__main__":
     v = 0
     a = 0.95
     model = ReConvNet(3, 128, 5, 5).to(device)
+    acc = 0
 
     #train_loader = T.utils.data.DataLoader(MNIST("data/mnist", download=True, train=True, 
     #    transform=transforms.ToTensor()), batch_size=64)
     train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
         transform=transforms.ToTensor()), batch_size=64)
+    test_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=False, 
+        transform=transforms.ToTensor()), batch_size=64)
     opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
     #sched = T.optim.lr_scheduler.CosineAnnealingLR
 
-    for epoch in range(10):
+    for epoch in range(100):
         for batch_n, (X,Y) in enumerate(train_loader):
             X = X.to(device)
             Y = Y.to(device)
@@ -132,16 +169,23 @@ if __name__ == "__main__":
             loss.backward()
             opti.step()
 
-            if not batch_n%10:
-                acc = (T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)==Y).sum()/Y.shape[0]
+            if not batch_n%100:
+                enc = enc.cpu()
+                Y = Y.cpu()
+                #X = X.cpu()
+                acc = 0.9*acc + 0.1*(T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)==Y).sum()/Y.shape[0]
                 print(epoch, batch_n, round(loss.item(), 3), acc.numpy().round(3), 
                     T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)[:5])
 
             if False:#not batch_n%100:
                 #maps = T.stack((maps, maps, maps), dim=-1)
+                X = X.cpu()
+                enc = enc.cpu()
                 X = X.permute(0,2,3,1)
                 together = T.cat((X,), dim=1)
                 pics = T.cat(list(together), dim=1)
                 print("saving results for"+f" {epoch}_{batch_n}", pics.shape)
                 #print(maps.shape, pics.shape, together.shape, pics.shape)
                 plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().numpy())
+        
+        eval_model(model, test_loader)
