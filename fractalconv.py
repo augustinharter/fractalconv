@@ -8,31 +8,35 @@ from itertools import chain
 from matplotlib import pyplot as plt
 import os
 import math
+import argparse
 from PIL import Image, ImageDraw
 
 
 class ReConvNet(nn.Module):
-    def __init__(self, in_dim, hid_dim, in_kernel, hid_kernel):
+    def __init__(self, in_dim, hid_dim, in_kernel, hid_kernel, parse=False):
         super().__init__()
         #self.inconv = nn.Conv2d(in_dim, hid_dim, in_kernel, 1, in_kernel//2)
         self.inconv = nn.Conv2d(in_dim, hid_dim, in_kernel, 1, in_kernel//2)
         #self.outconv = nn.Conv2d(hid_dim, in_dim, kernel_size, 1, 0)
         #self.reconv = nn.Conv2d(hid_dim, hid_dim, hid_kernel, 1, hid_kernel//2)
         self.reconv = nn.Conv2d(hid_dim, hid_dim, hid_kernel, 1, 0)
-        parse_depth = 2
-        n_parse_feature_per_spatial_dim = 2
-        self.parse_depth = parse_depth
-        parse_in_dim = hid_dim + hid_dim*parse_depth*n_parse_feature_per_spatial_dim**2
-        print("parse in dim", parse_in_dim)
-        self.parser = nn.Sequential(
-            nn.Linear(parse_in_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 10),
-            #nn.Softmax()
-        )
+
+        self.parse = parse
+        if parse:
+            parse_depth = 2
+            n_parse_feature_per_spatial_dim = 2
+            self.parse_depth = parse_depth
+            parse_in_dim = hid_dim + hid_dim*parse_depth*n_parse_feature_per_spatial_dim**2
+            print("parse in dim", parse_in_dim)
+            self.parser = nn.Sequential(
+                nn.Linear(parse_in_dim, 256),
+                nn.ReLU(),
+                nn.Linear(256, 10),
+                #nn.Softmax()
+            )
+            self.adapool = nn.AdaptiveMaxPool2d(n_parse_feature_per_spatial_dim)
 
         self.pool = nn.MaxPool2d(2)
-        self.adapool = nn.AdaptiveMaxPool2d(n_parse_feature_per_spatial_dim)
         self.hid_kernel = hid_kernel
         self.pad = hid_kernel//2
         self.acti = nn.LeakyReLU()
@@ -85,53 +89,87 @@ class ReConvNet(nn.Module):
         X = self.pool(X)
         #print(i, "finalpooled", X.shape)
 
-        actis = [X.squeeze()]
-        #print(actis[0].shape)
-        acti_list = acti_list[-self.parse_depth:][::-1]
-        for acti in acti_list:
-            #print("before", acti.shape)
-            acti = self.adapool(acti).flatten(1)
-            #print("after", acti.shape)
-            actis.append(acti)
-        actis = T.cat(actis, dim=1)
-        #print("actual parse in dim", actis.shape)
-        pred = self.parser(actis)
-        
-        return pred
+        if self.parse:
+            actis = [X.squeeze()]
+            #print(actis[0].shape)
+            acti_list = acti_list[-self.parse_depth:][::-1]
+            for acti in acti_list:
+                #print("before", acti.shape)
+                acti = self.adapool(acti).flatten(1)
+                #print("after", acti.shape)
+                actis.append(acti)
+            actis = T.cat(actis, dim=1)
+            #print("actual parse in dim", actis.shape)
+            pred = self.parser(actis)
+            
+            return pred, X
+
+        else:
+            return X.squeeze()[:,:10], X
 
 
 def eval_model(model, loader):
     hits = []
     for batch_n, (X,Y) in enumerate(loader):
-        X = X.to(device)
-        Y = Y.to(device)
-        enc = model(X)
-        #print("enc", enc.shape)
-        #print(enc.requires_grad)
+        with T.no_grad():
+            X = X.to(device)
+            Y = Y.to(device)
+            pred, _ = model(X)
 
-        #loss = F.cross_entropy(enc.flatten(1)[:,:10], Y)
-        loss = F.cross_entropy(enc, Y)
-
-        opti.zero_grad()
-        loss.backward()
-        opti.step()
-
-        enc = enc.cpu()
+        pred = pred.cpu()
         Y = Y.cpu()
         #X = X.cpu()
-        hits.append(T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)==Y)
+        hits.append(T.argmax(pred.detach(), dim=-1)==Y)
         if batch_n != 10:
             acc = hits[-1].sum()/len(hits[-1])
             print("running eval:", batch_n, acc.numpy().round(3), end="\r")
-        
-        if batch_n>=10:
-            break
-
     
     print()
     hits = T.cat(hits, dim=0)
     acc = hits.sum()/hits.shape[0]
-    print("eval finished - accuracy:", acc.item())
+    print("EVAL FINISHED - accuracy:", acc.item())
+
+
+def train_model(model, train_loader, test_loader=None):
+    # TRAINING
+    for epoch in range(50):
+        for batch_n, (X,Y) in enumerate(train_loader):
+            X = X.to(device)
+            Y = Y.to(device)
+            pred, top_layer = model(X)
+
+            #print("pred", pred.shape)
+            #print(pred.requires_grad)
+
+            loss = F.cross_entropy(pred, Y)
+
+            opti.zero_grad()
+            loss.backward()
+            opti.step()
+
+            if not batch_n%100:
+                pred = pred.cpu()
+                Y = Y.cpu()
+                #X = X.cpu()
+                acc = (T.argmax(pred.detach(), dim=-1)==Y).sum()/Y.shape[0]
+                print(epoch, batch_n, round(loss.item(), 3), acc.numpy().round(3), 
+                    T.argmax(pred.detach().flatten(1)[:,:10], dim=-1)[:5])
+
+            if not batch_n and not epoch:
+                #maps = T.stack((maps, maps, maps), dim=-1)
+                X = X.cpu()
+                pred = pred.cpu()
+                X = X.permute(0,2,3,1)
+                if args.random:
+                    X = X*T.tensor((0.229, 0.224, 0.225))+T.tensor((0.485, 0.456, 0.406))
+                together = T.cat((X,), dim=1)
+                pics = T.cat(list(together), dim=1)
+                print("saving results for"+f" {epoch}_{batch_n}", pics.shape)
+                #print(maps.shape, pics.shape, together.shape, pics.shape)
+                plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().numpy())
+        
+        if test_loader is not None:
+            eval_model(model, test_loader)
 
 
 if __name__ == "__main__":
@@ -140,52 +178,71 @@ if __name__ == "__main__":
     device = "cuda" if T.cuda.is_available() else "cpu"
     print("device:", device)
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-mnist", action="store_true")
+    parser.add_argument("-parse", action="store_true")
+    parser.add_argument("--random", type=float, default=0)
+    parser.add_argument("--dims", type=int, default=32)
+    parser.add_argument("--ks", type=int, default=3)
+    args = parser.parse_args()
+
     v = 0
     a = 0.95
-    model = ReConvNet(3, 128, 5, 5).to(device)
-    acc = 0
 
-    #train_loader = T.utils.data.DataLoader(MNIST("data/mnist", download=True, train=True, 
-    #    transform=transforms.ToTensor()), batch_size=64)
-    train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
-        transform=transforms.ToTensor()), batch_size=64)
-    test_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=False, 
-        transform=transforms.ToTensor()), batch_size=64)
+
+    # SETUP MODEL AND OPTI
+    model = ReConvNet(1 if args.mnist else 3,
+        args.dims, 
+        args.ks, 
+        args.ks, 
+        parse=args.parse
+    ).to(device)
     opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
     #sched = T.optim.lr_scheduler.CosineAnnealingLR
 
-    for epoch in range(100):
-        for batch_n, (X,Y) in enumerate(train_loader):
-            X = X.to(device)
-            Y = Y.to(device)
-            enc = model(X)
-            #print("enc", enc.shape)
-            #print(enc.requires_grad)
 
-            #loss = F.cross_entropy(enc.flatten(1)[:,:10], Y)
-            loss = F.cross_entropy(enc, Y)
+    # SETUP DATA TRANSFORMS
+    if args.random:
+        r = args.random
+        train_transforms = transforms.Compose([
+            transforms.ToTensor(),
+            #transforms.RandomApply([
+            #    transforms.GaussianBlur(3, sigma=(0.1, 2.0))
+            #], p=0.2),
+            transforms.RandomApply([
+                transforms.Grayscale(num_output_channels=3)
+            ], p=0.2),
+            transforms.RandomApply([
+                transforms.ColorJitter(brightness=r, contrast=r, saturation=r, hue=r)
+            ]),  
+            transforms.RandomApply([
+                transforms.RandomAffine(r*10, shear=r*10)
+            ]),
+            transforms.RandomResizedCrop((32,32), scale=(1-r, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        test_transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+        ])
+    else:
+        train_transforms = transforms.ToTensor()
+        test_transforms = transforms.ToTensor()
 
-            opti.zero_grad()
-            loss.backward()
-            opti.step()
 
-            if not batch_n%100:
-                enc = enc.cpu()
-                Y = Y.cpu()
-                #X = X.cpu()
-                acc = 0.9*acc + 0.1*(T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)==Y).sum()/Y.shape[0]
-                print(epoch, batch_n, round(loss.item(), 3), acc.numpy().round(3), 
-                    T.argmax(enc.detach().flatten(1)[:,:10], dim=-1)[:5])
+    # LOADING DATA
+    if args.mnist:
+        train_loader = T.utils.data.DataLoader(MNIST("data/", download=True, train=True, 
+           transform=train_transforms), batch_size=64)    
+        test_loader = T.utils.data.DataLoader(MNIST("data/", download=True, train=False, 
+           transform=test_transforms), batch_size=64)    
+    else:
+        train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
+            transform=train_transforms), batch_size=64)
+        test_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=False, 
+            transform=test_transforms), batch_size=64)
+    #print(len(train_loader), len(test_loader))
 
-            if False:#not batch_n%100:
-                #maps = T.stack((maps, maps, maps), dim=-1)
-                X = X.cpu()
-                enc = enc.cpu()
-                X = X.permute(0,2,3,1)
-                together = T.cat((X,), dim=1)
-                pics = T.cat(list(together), dim=1)
-                print("saving results for"+f" {epoch}_{batch_n}", pics.shape)
-                #print(maps.shape, pics.shape, together.shape, pics.shape)
-                plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().numpy())
-        
-        eval_model(model, test_loader)
+    train_model(model, train_loader, test_loader=test_loader)
+    
