@@ -78,12 +78,12 @@ if __name__ == "__main__":
 
     v = 0
     a = 0.95
-    model = ReConvNet(3, 128, 5, 5)
+    model = ReConvNet(1, 32, 3, 3)
 
-    #train_loader = T.utils.data.DataLoader(MNIST("data/mnist", download=True, train=True, 
-    #    transform=transforms.ToTensor()), batch_size=64)
-    train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
+    train_loader = T.utils.data.DataLoader(MNIST("data/mnist", download=True, train=True, 
         transform=transforms.ToTensor()), batch_size=64)
+    #train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
+    #    transform=transforms.ToTensor()), batch_size=64)
     opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
     #sched = T.optim.lr_scheduler.CosineAnnealingLR
 

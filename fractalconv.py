@@ -10,6 +10,7 @@ import os
 import math
 import argparse
 from PIL import Image, ImageDraw
+import numpy as np
 
 
 class ReConvNet(nn.Module):
@@ -131,6 +132,14 @@ def eval_model(model, loader):
 
 
 def train_model(model, train_loader, test_loader=None):
+    # LOADING MODEL
+    if args.load:
+        load_model(model, args.model_name)
+
+    # SETUP OPTIMIZER
+    opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
+    #sched = T.optim.lr_scheduler.CosineAnnealingLR
+
     # TRAINING
     for epoch in range(50):
         for batch_n, (X,Y) in enumerate(train_loader):
@@ -168,8 +177,56 @@ def train_model(model, train_loader, test_loader=None):
                 #print(maps.shape, pics.shape, together.shape, pics.shape)
                 plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().numpy())
         
+        # EVAL MODEL
         if test_loader is not None:
             eval_model(model, test_loader)
+
+        # SAVING MODEL
+        save_model(model, args.model_name)
+
+
+def load_model(model, name):
+    print("loading model", name)
+    model.load_state_dict(T.load("saves/"+name+".pt"))
+    return model
+
+
+def save_model(model, name):
+    print("saving model", name)
+    T.save(model.state_dict(), "saves/"+name+".pt")
+
+
+def incept_model(model, name):
+    model = load_model(model, name)
+    batchsize = 10
+    path = f"results/incept/{name}-3/"
+    os.makedirs(path, exist_ok=True)
+
+    for label_idx in range(args.dims):
+        X = T.rand(batchsize, 1, 28, 28, requires_grad=True)
+        opti = T.optim.SGD([X], lr=1, weight_decay=0.005)
+        results = []
+
+        for iteration_idx in range(1000):
+            pred, acti = model(X)
+            acti = acti.squeeze()
+            
+            loss = F.cross_entropy(acti, T.ones(batchsize, dtype=T.long)*label_idx)
+
+
+            opti.zero_grad()
+            loss.backward()
+            opti.step()
+
+            X.data[X.data>1] = 1
+
+            if not iteration_idx%100:
+                print(label_idx, iteration_idx, "grad sum:", X.grad.abs().sum())
+                results.append(np.concatenate(F.pad(X.detach(), (2,2,2,2)).numpy(), axis=2).squeeze())
+
+        plt.imsave(path+f"index-{label_idx}.png", np.concatenate(results, axis=0))
+        #plt.show()
+
 
 
 if __name__ == "__main__":
@@ -181,10 +238,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-mnist", action="store_true")
     parser.add_argument("-parse", action="store_true")
+    parser.add_argument("-load", action="store_true")
+    parser.add_argument("-incept", action="store_true")
+    parser.add_argument("-train", action="store_true")
     parser.add_argument("--random", type=float, default=0)
     parser.add_argument("--dims", type=int, default=32)
     parser.add_argument("--ks", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--save", type=bool, default=True)
+    parser.add_argument("--model-name", type=str, default="model")
     args = parser.parse_args()
+    print(args)
 
     v = 0
     a = 0.95
@@ -197,8 +261,6 @@ if __name__ == "__main__":
         args.ks, 
         parse=args.parse
     ).to(device)
-    opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
-    #sched = T.optim.lr_scheduler.CosineAnnealingLR
 
 
     # SETUP DATA TRANSFORMS
@@ -244,5 +306,9 @@ if __name__ == "__main__":
             transform=test_transforms), batch_size=64)
     #print(len(train_loader), len(test_loader))
 
-    train_model(model, train_loader, test_loader=test_loader)
+    if args.train:
+        train_model(model, train_loader, test_loader=test_loader)
+
+    if args.incept:
+        incept_model(model, args.model_name)
     
