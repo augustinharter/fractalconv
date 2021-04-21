@@ -331,7 +331,6 @@ def train_model(model, train_loader, test_loader=None):
                 X, Y = X
                 Y = Y.to(device).float()
             X = X.to(device).float()
-            print(X.shape)
             recon, exci, desti, relax = model(X)
             flat_desti = T.cat([layer.flatten(0) for layer in desti], dim=0)
 
