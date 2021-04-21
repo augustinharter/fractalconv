@@ -1,6 +1,7 @@
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import dataset
 from torchvision.datasets import MNIST, CIFAR10
 from torchvision.transforms import transforms
 from PIL import Image, ImageShow
@@ -12,6 +13,7 @@ import argparse
 from PIL import Image, ImageDraw
 import numpy as np
 import copy
+from minerldata import get_minerl_dataset
 
 
 class ReConvNet(nn.Module):
@@ -131,7 +133,6 @@ class Destiller(nn.Module):
                 #nn.Softmax()
             )
             self.adapool = nn.AdaptiveMaxPool2d(n_parse_feature_per_spatial_dim)
-
         if radius == 5:
             sobelx = T.FloatTensor([[1,  2, 0,  -2, -1],
                                         [4,  8, 0,  -8, -4],
@@ -144,10 +145,10 @@ class Destiller(nn.Module):
                 [2,0,-2],
                 [1,0,-1]
             ])
-
+        sobelx = sobelx.float()
         sobely = sobelx.permute(1,0)
-        self.sobelx_kernel = sobelx.expand(hid_dim, hid_dim, radius, radius)
-        self.sobely_kernel = sobely.expand(hid_dim, hid_dim, radius, radius)
+        self.sobelx_kernel = 0+sobelx.expand(hid_dim, hid_dim, radius, radius)
+        self.sobely_kernel = 0+sobely.expand(hid_dim, hid_dim, radius, radius)
 
         update_conv_func = lambda: nn.Sequential(
             nn.Conv2d(hid_dim*4, hid_dim, 1, 1, 0),
@@ -184,6 +185,7 @@ class Destiller(nn.Module):
             X = self.pool(X)
             acti_list.append(X)
             #print(i, "midpool", X.shape)
+            #print("excite", X)
             i += 1
 
         #print(i, "prefinalpad", X.shape)
@@ -240,6 +242,7 @@ class Destiller(nn.Module):
         down_mode = "nearest"
         actis = [e.clone() for e in actis]
         #acti_backup = copy.deepcopy([e.detach() for e in actis])
+        #print("init", [e.sum() for e in actis])
 
         for iter_idx in range(n_iter):
             top_down = []
@@ -250,17 +253,23 @@ class Destiller(nn.Module):
             for i, X in enumerate(actis):
                 bottom_up.append(T.zeros_like(X) if not i else F.interpolate(actis[i-1], X.shape[-2:], mode=up_mode))
                 top_down.append(T.zeros_like(X) if i==n-1 else F.interpolate(actis[i+1], X.shape[-2:], mode=down_mode))
+                #print(T.ones_like(self.sobelx_kernel).type())
                 xgrad.append(F.conv2d(X, self.sobelx_kernel, stride=1, padding=1))
                 ygrad.append(F.conv2d(X, self.sobely_kernel, stride=1, padding=1))
             
             for i in range(n):
-                influence = T.cat((top_down[i], bottom_up[i], xgrad[i], ygrad[i]), dim=1)
+                influence = (top_down[i], bottom_up[i], xgrad[i], ygrad[i])
+                influence = T.cat(influence, dim=1)
                 if destillate:
-                    actis[i] = actis[i] + self.concentrate(influence)
+                    change = self.concentrate(influence)
+                    #print("change", change.sum())
+                    actis[i] = actis[i] + change
+                    #print("destillation...")
                 else:
-                    old_acti = actis[i]
+                    #old_acti = actis[i]
                     actis[i] = actis[i] + self.relax(influence)
                     #print("local acti diff", (old_acti-actis[i]).abs().mean().item())
+                #print("post", i, actis[i].sum())
 
         # INJECT OPTIONS
         if destillate:
@@ -317,9 +326,12 @@ def eval_model(model, loader):
 def train_model(model, train_loader, test_loader=None):
     # TRAINING
     for epoch in range(50):
-        for batch_n, (X,Y) in enumerate(train_loader):
-            X = X.to(device)
-            Y = Y.to(device)
+        for batch_n, X in enumerate(train_loader):
+            if isinstance(X, list):
+                X, Y = X
+                Y = Y.to(device).float()
+            X = X.to(device).float()
+            print(X.shape)
             recon, exci, desti, relax = model(X)
             flat_desti = T.cat([layer.flatten(0) for layer in desti], dim=0)
 
@@ -327,6 +339,7 @@ def train_model(model, train_loader, test_loader=None):
             #print("pred", pred.shape)
             #print(pred.requires_grad)
             #loss = F.cross_entropy(pred, Y)
+            #print(recon)
 
             # LOSSES
             orig_recon_loss = F.mse_loss(recon, X)
@@ -351,7 +364,7 @@ def train_model(model, train_loader, test_loader=None):
             opti.step()
 
             if not batch_n%2:
-                Y = Y.cpu()
+                #Y = Y.cpu()
                 flat_desti = flat_desti.detach()
                 comp = T.isclose(flat_desti, T.zeros_like(flat_desti), atol=0.001)
                 #X = X.cpu()
@@ -377,17 +390,18 @@ def train_model(model, train_loader, test_loader=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-mnist", action="store_true")
     parser.add_argument("-parse", action="store_true")
     parser.add_argument("-vis", action="store_true")
     parser.add_argument("-softmax", action="store_true")
     parser.add_argument("-max-inject", action="store_true")
+
     parser.add_argument("--acti-recon", type=float, default=0.0)
     parser.add_argument("--L1", type=float, default=0.0)
     parser.add_argument("--random", type=float, default=0)
     parser.add_argument("--dims", type=int, default=32)
     parser.add_argument("--ks", type=int, default=3)
     parser.add_argument("--name", type=str, default="base")
+    parser.add_argument("--dataset", type=str, default="minerl")
     args = parser.parse_args()
 
     save_path = f"results/destill/{args.name}/"
@@ -397,14 +411,6 @@ if __name__ == "__main__":
 
     v = 0
     a = 0.95
-
-
-    # SETUP MODEL AND OPTI
-    #model = ReConvNet(1 if args.mnist else 3, args.dims, args.ks, args.ks, parse=args.parse).to(device)
-    model = Destiller(1 if args.mnist else 3, args.dims, args.ks, args.ks, parse=args.parse).to(device)
-    opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
-    #sched = T.optim.lr_scheduler.CosineAnnealingLR
-
 
     # SETUP DATA TRANSFORMS
     if args.random:
@@ -437,17 +443,29 @@ if __name__ == "__main__":
 
 
     # LOADING DATA
-    if args.mnist:
+    dataname = args.dataset
+    if dataname=="mnist":
         train_loader = T.utils.data.DataLoader(MNIST("data/", download=True, train=True, 
            transform=train_transforms), batch_size=64)    
         test_loader = T.utils.data.DataLoader(MNIST("data/", download=True, train=False, 
            transform=test_transforms), batch_size=64)    
-    else:
+    if dataname=="cifar10":
         train_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=True, 
             transform=train_transforms), batch_size=64)
         test_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=False, 
             transform=test_transforms), batch_size=64)
+    if dataname=="minerl":
+        data = get_minerl_dataset()
+        #train, test = data, data[-2000:]
+        train_loader = T.utils.data.DataLoader(data, batch_size=32)
+        test_loader = None #T.utils.data.DataLoader(test, batch_size=32)
     #print(len(train_loader), len(test_loader))
+
+    # SETUP MODEL AND OPTI
+    #model = ReConvNet(1 if args.mnist else 3, args.dims, args.ks, args.ks, parse=args.parse).to(device)
+    model = Destiller(1 if dataname=="mnist" else 3, args.dims, args.ks, args.ks, parse=args.parse).to(device)
+    opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
+    #sched = T.optim.lr_scheduler.CosineAnnealingLR
 
     train_model(model, train_loader, test_loader=test_loader)
     
