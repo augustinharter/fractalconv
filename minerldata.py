@@ -15,7 +15,7 @@ def get_minerl_dataset(size = 20000, envname = "Treechop", mode = "full"):
         with gzip.open(datadir + f"{envname}-{mode}-{size}.pickle", 'rb') as fp:
             X = pickle.load(fp)
         print("finished loading dataset")
-        return T.from_numpy(X).permute(0,3,1,2)
+        return T.from_numpy(X).permute(0,3,1,2)/255.0
 
     os.makedirs(datadir, exist_ok=True)
     if not os.path.exists(f"{os.getenv('MINERL_DATA_ROOT', 'data/')}/MineRL{envname}VectorObf-v0"):
@@ -59,4 +59,4 @@ def get_minerl_dataset(size = 20000, envname = "Treechop", mode = "full"):
     # DEV
     print("full ep length:", full_ep_lens, "beginning percentage", size/full_ep_lens)
 
-    return T.from_numpy(X).permute(0,3,1,2)
+    return T.from_numpy(X).permute(0,3,1,2)/255.0

@@ -112,8 +112,8 @@ class ReConvNet(nn.Module):
             return X.squeeze()[:,:10], X
 
 
-class Destiller(nn.Module):
-    def __init__(self, in_dim, hid_dim, in_kernel, hid_kernel, parse=False, radius=3, width=32):
+class NCA(nn.Module):
+    def __init__(self, in_dim, hid_dim, in_kernel, hid_kernel, parse=False, radius=3, width=64):
         super().__init__()
         self.inconv = nn.Conv2d(in_dim, hid_dim, in_kernel, 1, in_kernel//2)
         self.outconv = nn.Conv2d(hid_dim, in_dim, in_kernel, 1, in_kernel//2)
@@ -158,8 +158,9 @@ class Destiller(nn.Module):
         self.sobely_kernel = nn.Parameter(0+sobely.expand(hid_dim, hid_dim, radius, radius), requires_grad=False)
 
         update_conv_func = lambda: nn.Sequential(
-            nn.Conv2d(hid_dim*4, hid_dim, 1, 1, 0),
-            nn.Tanh()
+            nn.Conv2d(hid_dim*5, hid_dim*2, 1, 1, 0),
+            nn.ReLU(),
+            nn.Conv2d(hid_dim*2, hid_dim, 1, 1, 0)
         )
 
         up_conv = nn.Conv2d(hid_dim, hid_dim, 3, 1, 1) 
@@ -169,8 +170,8 @@ class Destiller(nn.Module):
         self.down_conv = nn.Conv2d(hid_dim, hid_dim, 3, 1, 1),
 
         self.encode = update_conv_func()
-
         self.decode = update_conv_func()
+        self.rules = update_conv_func()
 
         self.pool = nn.MaxPool2d(2)
         self.hid_kernel = hid_kernel
@@ -250,7 +251,6 @@ class Destiller(nn.Module):
         return actis
 
 
-
     def parse(self, X):
         if self.parse:
             actis = [X.squeeze()]
@@ -271,21 +271,11 @@ class Destiller(nn.Module):
             return X.squeeze()[:,:10], X
 
 
-    def propagate(self, mode="encode", stimulus=None, actis=None, n_reps=3, 
+    def propagate(self, modes=[1,-1,1,-1,1,-1], stimulus=None, actis=None, 
         up_mode="conv", down_mode="bilinear", side_mode="grad"):
         global args
         # Check if stimulus OR actis are given
         assert (stimulus is not None) or (actis is not None)
-
-        # Check for Mode
-        if mode=="encode":
-            update = self.encode
-            direction = 1
-        elif mode=="decode":
-            update = self.decode
-            direction = -1
-        else:
-            assert False, f"can't recognize mode {mode}"
 
         # Get parameters from class
         width = self.width
@@ -305,12 +295,12 @@ class Destiller(nn.Module):
         depth = len(actis)
 
         # Repetition Loop
-        for rep_idx in range(n_reps):
+        for mode_idx, mode in enumerate(modes):
             
             # Iterating over Layers
-            for layer_idx in range(depth)[::direction]:
+            for layer_idx in range(depth)[::mode or 1]:
                 current_layer = actis[layer_idx]
-                #print(rep_idx, layer_idx, current_layer.shape)
+                #print(mode_idx, layer_idx, current_layer.shape)
 
                 # BOTTOM UP
                 if not layer_idx:  # if first layer
@@ -365,13 +355,18 @@ class Destiller(nn.Module):
                     assert False, f"can't recognize side mode {side_mode}"
 
                 # UPDATE
-                #print(rep_idx, layer_idx, bottom_up.shape, top_down.shape, side_side.shape)
-                influence = T.cat((bottom_up, top_down, side_side), dim=1)
-                actis[layer_idx] = current_layer + update(influence)
+                #print(mode_idx, layer_idx, bottom_up.shape, top_down.shape, side_side.shape)
+                influence = T.cat((current_layer, bottom_up, top_down, side_side), dim=1)
+                actis[layer_idx] = current_layer + self.rules(influence)
                 zeros = T.isclose(current_layer.detach().flatten(), T.zeros_like(current_layer.detach().flatten()), atol=0.01)
-                #print("zeros", rep_idx, layer_idx, zeros.float().mean().numpy().round(5))
+                #print("zeros", mode_idx, layer_idx, zeros.float().mean().numpy().round(5))
+                if args.stimulus_mode=="residual":
+                    stimulus = stimulus + self.outconv(actis[0])
+                elif args.stimulus_mode=="direct":
+                    stimulus = self.outconv(actis[0])
                
 
+        """
         # PRUNING OPTIONS
         if mode=="encode":
             if args.max:
@@ -387,23 +382,23 @@ class Destiller(nn.Module):
                         actis[i] = T.softmax(actis[i], dim=1)
                     else:
                         actis[i] = T.T.zeros_like(actis[i])
-        
+        """
+
+        if args.stimulus_mode!="end-residual":
+            stimulus = stimulus + self.outconv(actis[0])
+        if args.stimulus_mode!="end-direct":
+            stimulus = self.outconv(actis[0])
+
         #print("all acti diffs:", [(actis[i]-acti_backup[i]).abs().mean().item() for i in range(len(actis))])
-        return actis
+        return stimulus, actis
 
 
     def forward(self, X, excite=False):
         excitation = self.excite(X) if excite else None
         #print("exci", [e.shape for e in excitation])
-        destillation = self.propagate(actis=excitation) if excite else self.propagate(stimulus=X)
-        #print("destill diff:", [(destillation[i]-excitation[i]).abs().mean().item() for i in range(len(excitation))])
-        #activations = T.cat([layer.flatten(0) for layer in destillation], dim=0)
-        relaxation = self.propagate(mode="decode", actis=destillation)
-        #print("relax diff:", [(destillation[i]-relaxation[i]).abs().mean().item() for i in range(len(excitation))])
-        reconstruction = T.sigmoid(self.outconv(relaxation[0]))
-        #print("recon", reconstruction.detach().abs().mean(), "X", X.abs().mean())
+        reconstruction, actis = self.propagate(actis=excitation) if excite else self.propagate(stimulus=X)
 
-        return reconstruction, excitation, destillation, relaxation
+        return reconstruction, actis
 
        
 def eval_model(model, loader):
@@ -436,8 +431,8 @@ def train_model(model, train_loader, test_loader=None):
                 X, Y = X
                 Y = Y.to(device).float()
             X = X.to(device).float()
-            recon, exci, desti, relax = model(X, excite=args.excite)
-            flat_desti = T.cat([layer.flatten(0) for layer in desti], dim=0)
+            recon, actis = model(X, excite=args.excite)
+            flat_acti = T.cat([layer.flatten(0) for layer in actis], dim=0)
 
 
             #print("pred", pred.shape)
@@ -451,7 +446,7 @@ def train_model(model, train_loader, test_loader=None):
             losses = {"orig recon": orig_recon_loss.cpu().detach().numpy().round(3)}
 
             if args.L1:
-                L1_loss = flat_desti.abs().mean()
+                L1_loss = flat_acti.abs().mean()
                 loss = loss + args.L1* L1_loss
                 losses["L1"] = L1_loss.detach().numpy().round(3)
 
@@ -469,11 +464,11 @@ def train_model(model, train_loader, test_loader=None):
 
             if not batch_n%args.vis:
                 #Y = Y.cpu()
-                flat_desti = flat_desti.detach()
-                zeros = T.isclose(flat_desti, T.zeros_like(flat_desti), atol=0.001)
+                flat_acti = flat_acti.detach()
+                zeros = T.isclose(flat_acti, T.zeros_like(flat_acti), atol=0.001)
                 #X = X.cpu()
                 #acc = (T.argmax(pred.detach(), dim=-1)==Y).sum()/Y.shape[0]
-                print(epoch, batch_n, losses, "zero%:", zeros.float().mean().cpu().numpy().round(3))
+                print(epoch, batch_n, losses)#, "zero%:", zeros.float().mean().cpu().numpy().round(3))
 
                 X = X.cpu()
                 X = X.permute(0,2,3,1)
@@ -484,7 +479,7 @@ def train_model(model, train_loader, test_loader=None):
                 pics = T.cat(list(together), dim=1)
                 print("saving results for"+f" {epoch}_{batch_n}", pics.shape)
                 #print(maps.shape, pics.shape, together.shape, pics.shape)
-                plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().numpy())
+                plt.imsave(save_path+f"{epoch}-{batch_n}.png", pics.squeeze().clamp(0,1).numpy())
         
         if test_loader is not None:
             #eval_model(model, test_loader)
@@ -499,8 +494,10 @@ if __name__ == "__main__":
     parser.add_argument("-excite", action="store_true")
 
     parser.add_argument("--vis", type=int, default=10)
+    parser.add_argument("--datasize", type=int, default=5000)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--pruning", type=int, default=0)
+    parser.add_argument("--stimulus-mode", type=str, default="end-direct")
     parser.add_argument("--acti-recon", type=float, default=0.0)
     parser.add_argument("--L1", type=float, default=0.0)
     parser.add_argument("--random", type=float, default=0)
@@ -510,7 +507,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="minerl")
     args = parser.parse_args()
 
-    save_path = f"results/destill-new/{args.name}/"
+    save_path = f"results/nca/{args.name}/"
     os.makedirs(save_path, exist_ok=True)
     device = "cuda" if T.cuda.is_available() else "cpu"
     print("device:", device)
@@ -561,15 +558,15 @@ if __name__ == "__main__":
         test_loader = T.utils.data.DataLoader(CIFAR10("data/cifar10", download=True, train=False, 
             transform=test_transforms), batch_size=64)
     if dataname=="minerl":
-        data = get_minerl_dataset()
+        data = get_minerl_dataset(size=args.datasize)
         #train, test = data, data[-2000:]
-        train_loader = T.utils.data.DataLoader(data, batch_size=32)
+        train_loader = T.utils.data.DataLoader(data, batch_size=32, shuffle=True)
         test_loader = None #T.utils.data.DataLoader(test, batch_size=32)
     #print(len(train_loader), len(test_loader))
 
     # SETUP MODEL AND OPTI
     #model = ReConvNet(1 if args.mnist else 3, args.dims, args.ks, args.ks, parse=args.parse).to(device)
-    model = Destiller(1 if dataname=="mnist" else 3, args.dims, args.ks, args.ks, parse=args.parse, width=64 if dataname=="minerl" else 32).to(device)
+    model = NCA(1 if dataname=="mnist" else 3, args.dims, args.ks, args.ks, parse=args.parse, width=64 if dataname=="minerl" else 32).to(device)
     opti = T.optim.Adam(chain(model.parameters()), lr=1e-3)
     #sched = T.optim.lr_scheduler.CosineAnnealingLR
 

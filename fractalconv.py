@@ -12,7 +12,6 @@ import argparse
 from PIL import Image, ImageDraw
 import numpy as np
 
-
 class ReConvNet(nn.Module):
     def __init__(self, in_dim, hid_dim, in_kernel, hid_kernel, parse=False):
         super().__init__()
@@ -226,7 +225,6 @@ def incept_model(model, name):
 
         plt.imsave(path+f"index-{label_idx}.png", np.concatenate(results, axis=0))
         #plt.show()
-
 
 
 if __name__ == "__main__":
